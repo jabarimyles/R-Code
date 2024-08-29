@@ -1,0 +1,479 @@
+---
+title: "OR791 HW5"
+author: "Jabari Myles"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+```
+
+## 2) Gambler's Problem
+### For p=0.45
+
+We'll simulate 10000 trials of each possible starting scenario and a random first bet and calculate the number of times success is observed following each strategy.  
+```{r}
+set.seed(32)
+
+# Parameters
+N <- 10  # target amount
+p <- 0.45  # Prob of winning a bet
+trials <- 10000  # num trials
+
+# Function to simulate winning / losing
+gamble_step <- function(i, bet) {
+  if (runif(1) < p) {
+    return(i + bet)  # Win
+  } else {
+    return(i - bet)  # Lose
+  }
+}
+
+# Exploring start first bet + bold strategy later on
+simulate_game <- function(start_money, first_bet) {
+  money <- gamble_step(start_money, first_bet)
+  while (money > 0 && money < N) {
+    bet <- min(money, N - money)  # Bold strategy!
+    money <- gamble_step(money, bet)
+  }
+  return(money >= N)
+}
+
+# Success rates by  starting amount & feasible first bet
+results <- expand.grid(start_money = 1:(N - 1), first_bet = 1:(N - 1))
+results <- subset(results, first_bet <= start_money)
+
+results$success_rate <- mapply(function(start_money, first_bet) {
+  mean(replicate(trials, simulate_game(start_money, first_bet)))
+}, results$start_money, results$first_bet)
+
+# Max success rate by starting amount
+top_bets <- aggregate(success_rate ~ start_money, data = results, max)
+
+# marget to get coordinates for geom_tile
+top_bets <- merge(top_bets, results, by = c("start_money", "success_rate"))
+
+# Create heatmap with highlighted top blocks
+ggplot(results, aes(x = start_money, y = first_bet, fill = success_rate)) +
+  geom_tile() +
+  geom_tile(data = top_bets, color = "black", linewidth = 1, fill = NA) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Exploring Start with Bold Strategy",
+       subtitle = "Top Strategy Highlighted by Each Starting Amount",
+       x = "Starting Amount", y = "First Bet Amount") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+This is very similar to the bold strategy which is just to bet what you have.  Just the one little difference at 4 starting which we know from prior experience this should just be to bet \$4 as well.
+
+\newpage
+### With p=0.55
+We will use the same strategy as before but now switch to a timid policy since we have shown this to be optimal before.  But it will help show the optimal first bet given an exploring start.  
+
+```{r echo=FALSE}
+set.seed(300) # For reproducibility
+
+# Parameters
+N <- 10  # Target
+p <- 0.55  # New probability of winning a bet
+trials <- 1000  # Number of trials
+
+# Function to simulate one step of the game
+gamble_step <- function(i, bet) {
+  if (runif(1) < p) {
+    return(i + bet)  # Win
+  } else {
+    return(i - bet)  # Lose
+  }
+}
+
+# Function for the entire game with given first bet and then timid strategy
+simulate_game <- function(start_money, first_bet) {
+  money <- gamble_step(start_money, first_bet)
+  while (money > 0 && money < N) {
+    bet <- 1  # Timid strategy: always bet one
+    money <- gamble_step(money, bet)
+  }
+  return(money >= N)
+}
+
+# Calculate success rates for each starting amount and feasible first bet
+results <- expand.grid(start_money = 1:(N - 1), first_bet = 1:(N - 1))
+results <- subset(results, first_bet <= start_money)
+
+results$success_rate <- mapply(function(start_money, first_bet) {
+  mean(replicate(trials, simulate_game(start_money, first_bet)))
+}, results$start_money, results$first_bet)
+
+# Find the max success rate for each starting amount
+top_bets <- aggregate(success_rate ~ start_money, data = results, max)
+
+# Merge to get coordinates for geom_tile
+top_bets <- merge(top_bets, results, by = c("start_money", "success_rate"))
+
+# Create heatmap with highlighted top blocks
+ggplot(results, aes(x = start_money, y = first_bet, fill = success_rate)) +
+  geom_tile() +
+  geom_tile(data = top_bets, color = "black", linewidth = 1, fill = NA) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Exploring Start with Timid Strategy",
+       subtitle = "Top Strategy Highlighted by Each Starting Amount",
+       x = "Starting Amount", y = "First Bet Amount") +
+  theme_minimal() + theme(legend.position = "none")
+
+```
+
+\newpage
+### Epsilon Greedy!
+#### $\epsilon = 0.5$
+```{r cache=TRUE}
+library(ggplot2)
+
+set.seed(300) # For reproducibility
+
+# Parameters
+N <- 10  # Target
+p <- 0.45  # Probability of winning
+epsilon <- 0.5  #chance of doing something crazy
+trials <- 1000  # Number of trials for Monte Carlo simulation
+max_iterations <- 750  # Maximum number of policy iterations
+
+# sim one step of the game
+gamble_step <- function(current_amount, bet) {
+  if (runif(1) < p) {
+    return(current_amount + bet)  # Win
+  } else {
+    return(current_amount - bet)  # Lose
+  }
+}
+
+# Function for MC sim to evaluate a policy
+run_episode <- function(policy, state) {
+  episode_success <- numeric(trials)
+  
+  for (i in 1:trials) {
+    money <- state
+    while (money > 0 && money < N) {
+      bet <- min(policy[money], money)  # Ensure bet does not exceed current money
+      money <- gamble_step(money, bet)
+    }
+    episode_success[i] <- (money >= N)
+  }
+  
+  return(mean(episode_success))
+}
+
+# Policy iteration to find final policy
+policy <- rep(1, N-1)  # Initial timid policy (bet $1)
+policy_improvement_iterations <- 0
+
+while (policy_improvement_iterations < max_iterations) {
+  old_policy <- policy
+  policy_changed <- FALSE
+  
+  for (state in 1:(N-1)) {
+    state_values <- numeric(state)
+    for (action in 1:state) {
+      policy[state] <- action
+      state_values[action] <- run_episode(policy, state)
+    }
+    new_action <- which.max(state_values)
+    if (policy[state] != new_action) {
+      policy[state] <- new_action
+      policy_changed <- TRUE
+    }
+  }
+  
+  policy_improvement_iterations <- policy_improvement_iterations + 1
+  
+  if (!policy_changed) {
+    break
+  }
+}
+
+#cat("Total number of policy improvement iterations:", policy_improvement_iterations, "\n")
+
+# Calculate success rates under the final policy for each start_money and feasible bet size
+results <- expand.grid(start_money = 1:(N - 1), bet_size = 1:(N - 1))
+results <- subset(results, bet_size <= start_money)
+results$success_rate <- mapply(function(start_money, bet_size) {
+  temp_policy <- policy
+  temp_policy[start_money] <- bet_size
+  run_episode(temp_policy, start_money)
+}, results$start_money, results$bet_size)
+
+# heatmap
+ggplot(results, aes(x = start_money, y = bet_size, fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Success Rates by State and Bet Size",
+       subtitle="Epsilon = 0.5",
+       x = "Starting Amount", y = "Bet Size") +
+  theme_minimal()
+```
+
+\newpage
+#### $\epsilon = 0.1$  
+```{r echo=FALSE, cache=TRUE}
+# Parameters
+N <- 10  # Target
+p <- 0.45  # prob of winning
+epsilon <- 0.1  # #chance of doing something crazy
+trials <- 1000  # Number of trials for MC sim
+max_iterations <- 750  # Max number of policy iterations
+
+# Function to simulate one step of the game
+gamble_step <- function(current_amount, bet) {
+  if (runif(1) < p) {
+    return(current_amount + bet)  # Win
+  } else {
+    return(current_amount - bet)  # Lose
+  }
+}
+
+# Function for MC simulation to evaluate a policy
+run_episode <- function(policy, state) {
+  episode_success <- numeric(trials)
+  
+  for (i in 1:trials) {
+    money <- state
+    while (money > 0 && money < N) {
+      bet <- min(policy[money], money)  # Ensure bet does not exceed current money
+      money <- gamble_step(money, bet)
+    }
+    episode_success[i] <- (money >= N)
+  }
+  
+  return(mean(episode_success))
+}
+
+# Policy iteration to find final policy
+policy <- rep(1, N-1)  # Initial timid policy (bet $1)
+policy_improvement_iterations <- 0
+
+while (policy_improvement_iterations < max_iterations) {
+  old_policy <- policy
+  policy_changed <- FALSE
+  
+  for (state in 1:(N-1)) {
+    state_values <- numeric(state)
+    for (action in 1:state) {
+      policy[state] <- action
+      state_values[action] <- run_episode(policy, state)
+    }
+    new_action <- which.max(state_values)
+    if (policy[state] != new_action) {
+      policy[state] <- new_action
+      policy_changed <- TRUE
+    }
+  }
+  
+  policy_improvement_iterations <- policy_improvement_iterations + 1
+  
+  if (!policy_changed) {
+    break
+  }
+}
+
+#cat("Total number of policy improvement iterations:", policy_improvement_iterations, "\n")
+
+# Calculate success rates under the final policy for each start_money and feasible bet size
+results <- expand.grid(start_money = 1:(N - 1), bet_size = 1:(N - 1))
+results <- subset(results, bet_size <= start_money)
+results$success_rate <- mapply(function(start_money, bet_size) {
+  temp_policy <- policy
+  temp_policy[start_money] <- bet_size
+  run_episode(temp_policy, start_money)
+}, results$start_money, results$bet_size)
+
+# heatmap
+ggplot(results, aes(x = start_money, y = bet_size, fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Success Rates by State and Bet Size",
+       subtitle="Epsilon = 0.1",
+       x = "Starting Amount", y = "Bet Size") +
+  theme_minimal()
+```
+
+#### $\epsilon = 0.01$  
+```{r cache=TRUE}
+# Parameters
+N <- 10  # Target
+p <- 0.45  # prob of winning
+epsilon <- 0.01  #chance of doing something crazy
+trials <- 1000  # trials for MC sim
+max_iterations <- 750  # Maximum number of policy iterations
+
+# Sim one step of the game
+gamble_step <- function(current_amount, bet) {
+  if (runif(1) < p) {
+    return(current_amount + bet)  # Win
+  } else {
+    return(current_amount - bet)  # Lose
+  }
+}
+
+# MC sim to evaluate a policy
+run_episode <- function(policy, state) {
+  episode_success <- numeric(trials)
+  
+  for (i in 1:trials) {
+    money <- state
+    while (money > 0 && money < N) {
+      bet <- min(policy[money], money)  # Ensure bet does not exceed current money
+      money <- gamble_step(money, bet)
+    }
+    episode_success[i] <- (money >= N)
+  }
+  
+  return(mean(episode_success))
+}
+
+# Policy iteration to find final policy
+policy <- rep(1, N-1)  # Initial timid policy (bet $1)
+policy_improvement_iterations <- 0
+
+while (policy_improvement_iterations < max_iterations) {
+  old_policy <- policy
+  policy_changed <- FALSE
+  
+  for (state in 1:(N-1)) {
+    state_values <- numeric(state)
+    for (action in 1:state) {
+      policy[state] <- action
+      state_values[action] <- run_episode(policy, state)
+    }
+    new_action <- which.max(state_values)
+    if (policy[state] != new_action) {
+      policy[state] <- new_action
+      policy_changed <- TRUE
+    }
+  }
+  
+  policy_improvement_iterations <- policy_improvement_iterations + 1
+  
+  if (!policy_changed) {
+    break
+  }
+}
+
+#cat("Total number of policy improvement iterations:", policy_improvement_iterations, "\n")
+
+# Calculate success rates under the final policy for each start_money and feasible bet size
+results <- expand.grid(start_money = 1:(N - 1), bet_size = 1:(N - 1))
+results <- subset(results, bet_size <= start_money)
+results$success_rate <- mapply(function(start_money, bet_size) {
+  temp_policy <- policy
+  temp_policy[start_money] <- bet_size
+  run_episode(temp_policy, start_money)
+}, results$start_money, results$bet_size)
+
+# Create heatmap
+ggplot(results, aes(x = start_money, y = bet_size, fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Success Rates by State and Bet Size",
+       subtitle="Epsilon = 0.01",
+       x = "Starting Amount", y = "Bet Size") +
+  theme_minimal()
+```
+
+#### $\epsilon = 0.001$  
+```{r cache=TRUE, echo=FALSE}
+# Parameters
+N <- 10  # Target
+p <- 0.45  # prob of winning
+epsilon <- 0.001 #chance of doing something crazy
+trials <- 1000  # trials for Monte Carlo sim
+max_iterations <- 750  # Max number of policy iterations
+
+# Function to simulate one step of the game
+gamble_step <- function(current_amount, bet) {
+  if (runif(1) < p) {
+    return(current_amount + bet)  # Win
+  } else {
+    return(current_amount - bet)  # Lose
+  }
+}
+
+# MC sim to evaluate policy
+run_episode <- function(policy, state) {
+  episode_success <- numeric(trials)
+  
+  for (i in 1:trials) {
+    money <- state
+    while (money > 0 && money < N) {
+      bet <- min(policy[money], money)  # Ensure bet doesn't exceed current money
+      money <- gamble_step(money, bet)
+    }
+    episode_success[i] <- (money >= N)
+  }
+  
+  return(mean(episode_success))
+}
+
+# Policy iteration to find final policy
+policy <- rep(1, N-1)  # Initial timid policy (bet $1)
+policy_improvement_iterations <- 0
+
+while (policy_improvement_iterations < max_iterations) {
+  old_policy <- policy
+  policy_changed <- FALSE
+  
+  for (state in 1:(N-1)) {
+    state_values <- numeric(state)
+    for (action in 1:state) {
+      policy[state] <- action
+      state_values[action] <- run_episode(policy, state)
+    }
+    new_action <- which.max(state_values)
+    if (policy[state] != new_action) {
+      policy[state] <- new_action
+      policy_changed <- TRUE
+    }
+  }
+  
+  policy_improvement_iterations <- policy_improvement_iterations + 1
+  
+  if (!policy_changed) {
+    break
+  }
+}
+
+#cat("Total number of policy improvement iterations:", policy_improvement_iterations, "\n")
+
+# Success rates under final policy for each start_money amt & bet size
+results <- expand.grid(start_money = 1:(N - 1), bet_size = 1:(N - 1))
+results <- subset(results, bet_size <= start_money)
+results$success_rate <- mapply(function(start_money, bet_size) {
+  temp_policy <- policy
+  temp_policy[start_money] <- bet_size
+  run_episode(temp_policy, start_money)
+}, results$start_money, results$bet_size)
+
+# heatmap
+ggplot(results, aes(x = start_money, y = bet_size, fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Success Rates by State and Bet Size",
+       subtitle="Epsilon = 0.001",
+       x = "Starting Amount", y = "Bet Size") +
+  theme_minimal()
+```
+
+For some reason this honestly wasn't that quick to run--took maby 15 minutes so I'm not going to mess around with it.  Each of the versions looks good to me.  We can see a clearly superior policy developing where we should bet the maximum possible when n < \$5.  Then decreases as we approach \$10.  
+
+Of note--these are all for p= 45%.  From previous work, workk now this is very similar to the optimal theoretical policy.  
+
+## 3) 
+
+
+
+
+
+
+

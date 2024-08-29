@@ -1,0 +1,254 @@
+---
+title: "Autism Adult Analysis"
+author: Jabari Myles
+date: December 9, 2021
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE, fig.align="center"}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE, echo=FALSE}
+library(fastDummies)
+library(tidyverse)
+library(broom)
+library(gplots)
+library(reshape2)
+library(randomForest)
+library(separationplot)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(pROC)
+library(DHARMa)
+```
+
+```{r, echo=FALSE}
+Autism_Data <- read.csv('/Users/jabarimyles/Documents/Professional Development/Interviews/Autism-Adult-Data.csv')
+```
+
+## Read In Data
+```{r, fig.align="center"}
+#This is an analysis that I did pro bono for a non-profit that allowed me to de-identify the data and keep it for personal use. It's a nice example of having no direction, but interesting data to work with. The ultimate outcome of it was that I found out that the organization was not very advanced in their statistical knowledge. After doing all of this work I found that their survey responses were used to both prediction and classify whether a given adult had autism or not. This clearly cannot work out because it would predict perfectly every time. Through exploring and predictions, I was able to figure this out and reroute their strategy. 
+
+head(Autism_Data)
+```
+
+```{r include=FALSE}
+Autism_Data$Age <- as.integer(Autism_Data$Age)
+Autism_Data <- Autism_Data %>% mutate(ASD = recode(ASD, 'YES' = 1, 'NO' = 0)) 
+```
+## Exploratory Data Analysis
+
+```{r}
+#Cross tabulation tables
+table(Autism_Data$ASD)
+table(Autism_Data$A1_Score, Autism_Data$ASD)
+table(Autism_Data$A2_Score, Autism_Data$ASD)
+table(Autism_Data$A3_Score, Autism_Data$ASD)
+table(Autism_Data$A4_Score, Autism_Data$ASD)
+table(Autism_Data$A5_Score, Autism_Data$ASD)
+table(Autism_Data$A6_Score, Autism_Data$ASD)
+table(Autism_Data$A7_Score, Autism_Data$ASD)
+table(Autism_Data$A8_Score, Autism_Data$ASD)
+table(Autism_Data$A9_Score, Autism_Data$ASD)
+table(Autism_Data$A10_Score, Autism_Data$ASD)
+table(Autism_Data$Age, Autism_Data$ASD)
+table(Autism_Data$Gender, Autism_Data$ASD)
+table(Autism_Data$Ethnicity, Autism_Data$ASD)
+table(Autism_Data$Jundice, Autism_Data$ASD)
+table(Autism_Data$Family, Autism_Data$ASD)
+table(Autism_Data$Used_app_before, Autism_Data$ASD)
+table(Autism_Data$Age_desc, Autism_Data$ASD)
+table(Autism_Data$Relation, Autism_Data$ASD)
+table(Autism_Data$App_result, Autism_Data$ASD)
+hist(Autism_Data$Age)
+```
+
+```{r}
+Autism_Data2 <- Autism_Data %>% gather("Scores_nums", "Scores", -c(Age, Gender, Ethnicity, Jundice, Family, Country_of_res, Used_app_before, App_result, Age_desc, Relation, ASD))
+```
+
+```{r}
+Autism_Data2 %>%
+  ggplot(aes(App_result, Relation)) +
+  geom_point(alpha=0.5, size=2, aes(color=Family))
+```
+
+```{r}
+
+cat_columns <- c('Gender', 'Jundice', 'Family','Used_app_before')
+
+not_cat_columns <- c('Age')
+
+#App_result was perfectly separated between 6 and 7. Age_desc only had one level and Country of res 
+Autism_Data2 <- Autism_Data %>% 
+  dplyr::select(-c('Country_of_res', 'Age_desc', 'App_result','Ethnicity','Relation')) %>% 
+  filter(!is.na(Age)) %>% #Removed these two. Ethncity and Relation both had 89 | 0 and 9 | 1 that put '?'
+  filter(Age < 115) %>%
+  #mutate(Ethnicity = recode(Ethnicity, 'others' = 'Others')) %>%
+  dummy_cols(select_columns = cat_columns, remove_selected_columns = TRUE,remove_first_dummy = TRUE) 
+
+hist(Autism_Data2$Age)
+
+```
+
+## Create Train and Test
+```{r}
+create_train_test <- function(data, size = 0.8, rand_seed = 1234) {
+  
+  samp_size <- floor(size * nrow(data))  
+  
+  set.seed(rand_seed)
+  
+  index <- sample(seq_len(nrow(data)), size = samp_size)
+ 
+  train <- data[index,]
+  test <- data[-index,]
+  
+  return(list(train, test))
+}
+
+data <- create_train_test(Autism_Data2, size = 0.75, rand_seed = 0925)
+
+train <- as.data.frame(data[1])
+test <- as.data.frame(data[2])
+
+head(train)
+```
+
+## Variable Selection
+
+### Chi-Squared Test
+```{r}
+# Chi squared test
+chi <- lapply(train[, !names(train) %in% c(not_cat_columns,'ASD')], function(x) chisq.test(train[,'ASD'], x));
+
+do.call(rbind, chi)[,c(1,3)]
+
+```
+
+### Fisher's Exact Test
+```{r}
+
+# Fisher's exact test using simulated p values
+mapply(function(x, y) fisher.test(x, y, simulate.p.value = TRUE)$p.value, train[, !names(train) %in% c(not_cat_columns,'ASD')], MoreArgs=list(train[,'ASD']))
+
+
+```
+
+### Variable Importance from Random Forest
+```{r}
+VariableImportancePlot <- randomForest(as.factor(ASD) ~. , data = train, importance=TRUE)
+varImpPlot(VariableImportancePlot)
+```
+
+## Modeling
+
+### Logistic Regression
+```{r}
+selected_cols <- c( 'A10_Score', 'A9_Score', 'A8_Score', 'A7_Score', 'A6_Score', 'A5_Score', 'A4_Score', 'A3_Score', 'A2_Score', 'A1_Score')
+
+train_selected <- train[c(selected_cols, 'ASD')]
+
+test_selected <- test[c(selected_cols, 'ASD')]
+
+# Logistic Regression without A8 and A2 Scores
+autism_log_model <- glm(ASD ~ . -A10_Score - A9_Score - A8_Score - A2_Score , data = train_selected, family = "binomial")
+
+summary(autism_log_model)
+```
+
+### Decision Tree
+```{r}
+# Decision Tree with A1-10 Scores
+autism_tree_model <- rpart(ASD ~ ., data=train_selected, method = 'class', minsplit = 1,)
+rpart.plot(autism_tree_model, extra = 106)
+
+```
+
+
+## Diagnostics
+
+### Standardized Plots
+
+```{r}
+# QQ and Fitted vs Res Plots
+simulationOutput <- simulateResiduals(fittedModel = autism_log_model, plot = F)
+
+plot(simulationOutput)
+
+```
+
+### Confusion Matrix
+
+```{r}
+
+# Predicts test set
+predicted_probs <-  predict(autism_log_model,
+                            newdata = test_selected,
+                            type='response')
+
+class_preds <- ifelse(predicted_probs >= 0.5, 1, 0) 
+
+# Confusion Matrix
+confusionMatrix(data = factor(class_preds),
+                reference = factor(test_selected$ASD), positive = "1")
+
+```
+
+### ROC Curve/AUC
+```{r}
+# The ROC Curve is a well known plot used to examine the tradeoff between true positives and true negatives when adjusting your threshold
+ROC  <- roc(test_selected$ASD, predicted_probs)
+plot(ROC, col = "#2c7fb8")
+
+paste("Area under curve of logistic regression: ", auc(ROC))
+
+```
+
+### Separation Plot
+```{r}
+# Separation Plot
+separationplot(predicted_probs, lwd1 = 0.7, actual = test_selected$ASD, col0 = "#fc8d59"  , col1 =  '#91cf60', newplot = F)
+# Advantages: 1) Relative number of events vs non events. 2) The range and degree of variation among the predicted probabilities. 3) The degree to which high predicted probabilities correspond  to events and vice versa. 4) The total number of events predicted by the model
+```
+## Target Shuffling
+```{r}
+#Target shuffling is a type of permutation test that you can use to see if the performance of your model is likely to be random
+target_shuffling <- function(training_data, test_data, test_target, trials = 50, model_accuracy = .5, seed = 0925){
+  vec <- c(1)
+  
+  set.seed(seed)
+
+  for(i in 1:trials){
+    model <- glm(sample(ASD, replace = F, size = length(training_data$ASD)) ~ . -A10_Score - A9_Score - A8_Score - A2_Score, data = training_data, family = "binomial")
+    
+    predicted_prob <- predict(model,
+                            newdata = test_data,
+                            type='response')
+    
+    predicted_prob <- predicted_prob + 0.3
+    
+    confusion <- table(test_target, predicted_prob >= 0.6)
+
+    accuracy <- (confusion[2, 2] + confusion[1, 1]) / sum(confusion)
+
+    vec[i] <- accuracy
+    
+  }
+  
+  hist(vec)
+  abline(v = model_accuracy, col="#fc8d59", lwd=4)
+}
+
+target_shuffling(training_data=train_selected,  test_data=test_selected, test_target=test_selected$ASD, model_accuracy = .90)
+```
+
+
+
